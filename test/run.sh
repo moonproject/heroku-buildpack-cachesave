@@ -57,17 +57,20 @@ echo "b" > "${BUILD}/logs/b.log"
 echo "data" > "${BUILD}/data.json"
 
 # ---------------------------------------------------------------------------
-# Case 1: direct file, folder, glob, and "!" exclusion
+# Case 1: direct file, folder, and "!" glob exclusion
+#
+# Additive entries are literal file/folder paths (no globbing). Exclusions
+# support globbing and only affect entries added by the lines above them.
 # ---------------------------------------------------------------------------
-run_case "paths, folders, globs and exclusions"
+run_case "paths, folders and glob exclusions"
 cat > "${BUILD}/.buildcache" <<'EOF'
 # a comment line and a blank line below
 
 single.txt
 code/server/node_modules
 !code/server/node_modules/.cache
-logs/*.log
-!logs/b.log
+logs
+!logs/*b*.log
 EOF
 
 CACHE1="${CACHE}/c1"
@@ -82,11 +85,12 @@ assert_not_cached "${CACHE1}" "logs/b.log"
 assert_not_cached "${CACHE1}" "data.json"
 
 # ---------------------------------------------------------------------------
-# Case 2: recursive ** glob
+# Case 2: literal folder path is copied wholesale (no globbing for additions)
 # ---------------------------------------------------------------------------
-run_case "recursive ** glob"
+run_case "literal folder paths copied wholesale"
 cat > "${BUILD}/.buildcache" <<'EOF'
-**/node_modules
+code/server/node_modules
+code/client/node_modules
 EOF
 
 CACHE2="${CACHE}/c2"
@@ -95,6 +99,38 @@ mkdir -p "${CACHE2}"
 
 assert_cached "${CACHE2}" "code/server/node_modules/dep.js"
 assert_cached "${CACHE2}" "code/client/node_modules/client.js"
+
+# ---------------------------------------------------------------------------
+# Case 2b: a glob in an additive entry is treated literally (not expanded)
+# ---------------------------------------------------------------------------
+run_case "additive globs are not expanded"
+cat > "${BUILD}/.buildcache" <<'EOF'
+logs/*.log
+EOF
+
+CACHE2B="${CACHE}/c2b"
+mkdir -p "${CACHE2B}"
+"${COMPILE}" "${BUILD}" "${CACHE2B}" > /dev/null
+
+assert_not_cached "${CACHE2B}" "logs/a.log"
+assert_not_cached "${CACHE2B}" "logs/b.log"
+
+# ---------------------------------------------------------------------------
+# Case 2c: exclusions only affect entries added above them
+# ---------------------------------------------------------------------------
+run_case "exclusions only affect lines above"
+cat > "${BUILD}/.buildcache" <<'EOF'
+code/server/node_modules
+!**/dep.js
+code/client/node_modules
+EOF
+
+CACHE2C="${CACHE}/c2c"
+mkdir -p "${CACHE2C}"
+"${COMPILE}" "${BUILD}" "${CACHE2C}" > /dev/null
+
+assert_not_cached "${CACHE2C}" "code/server/node_modules/dep.js"
+assert_cached     "${CACHE2C}" "code/client/node_modules/client.js"
 
 # ---------------------------------------------------------------------------
 # Case 3: tilde (home) paths still work
