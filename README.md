@@ -49,6 +49,12 @@ avoiding per-file looping.
 Patterns are evaluated top to bottom, so an exclusion only affects the entries
 matched by the lines above it.
 
+The cache is rebuilt from scratch on every build: the previous `buildcache`
+contents are cleared before the patterns are processed. This prevents files
+that are no longer matched (because they were removed from the source or from
+the `.buildcache` file) from lingering in the cache and growing the slug over
+time.
+
 Example:
 
 ```
