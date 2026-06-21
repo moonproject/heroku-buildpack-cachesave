@@ -2,12 +2,16 @@
 
 set -e # fail fast
 
-# Allow advanced globbing so that patterns in .buildcache behave like .gitignore:
+# Exclusion patterns ("!" lines) behave like .gitignore globs:
 #   *      - matches anything except a slash
 #   **     - matches across directory boundaries (recursive)
 #   ?, []  - standard shell globbing
 # nullglob: patterns that match nothing expand to nothing (instead of the literal pattern)
 # dotglob: globs also match dot files (like .gitignore does)
+#
+# Additive entries are NOT globbed: they are taken as literal file or folder
+# paths and copied as a whole. This avoids looping over individual files and
+# keeps caching fast even for very large directory trees.
 shopt -s nullglob dotglob globstar
 
 
@@ -22,31 +26,6 @@ HOME_FOLDER_REPLACEMENT="__CACHE_HOME__"
 
 
 echo "=====> Caching files for future builds"
-
-
-# Expand a glob into the concrete list of files it covers.
-# Directories are expanded recursively to every file they contain, so that an
-# entry/exclusion can target a folder as a whole.
-# Argument: a (possibly globbed) absolute path prefix.
-# Output: one absolute file path per line.
-expand_files() {
-  local match
-  for match in $1; do
-    if [ -d "${match}" ]; then
-      find "${match}" -type f 2>/dev/null
-    elif [ -e "${match}" ]; then
-      echo "${match}"
-    fi
-  done
-}
-
-
-# Insertion-ordered set of selected files.
-# PRESENT maps a "type|relative-path" key to 1 while the file is selected.
-# ORDER keeps the first-seen order so output is stable and predictable.
-declare -A PRESENT
-declare -A SEEN
-ORDER=()
 
 
 while IFS= read -r LINE || [ -n "${LINE}" ]; do
@@ -75,48 +54,33 @@ while IFS= read -r LINE || [ -n "${LINE}" ]; do
 
   # determine the base directory the pattern is resolved against
   if [[ ${LINE} = \~/* ]]; then
-    TYPE="home"
     BASE="${HOME}"
+    CACHE_BASE="${CACHE_DIR}/buildcache/${HOME_FOLDER_REPLACEMENT}"
     SUB="${LINE#\~/}"
   else
-    TYPE="build"
     BASE="${BUILD_DIR}"
+    CACHE_BASE="${CACHE_DIR}/buildcache"
     SUB="${LINE}"
   fi
 
-  while IFS= read -r ABS; do
-    [ -z "${ABS}" ] && continue
-    REL="${ABS#"${BASE}"/}"
-    KEY="${TYPE}|${REL}"
-    if ${NEGATE}; then
-      unset 'PRESENT[${KEY}]'
-    else
-      PRESENT[${KEY}]=1
-      if [ -z "${SEEN[${KEY}]+x}" ]; then
-        SEEN[${KEY}]=1
-        ORDER+=("${KEY}")
-      fi
-    fi
-  done < <(expand_files "${BASE}/${SUB}")
-done < "${BUILD_DIR}/.buildcache"
-
-
-for KEY in "${ORDER[@]}"; do
-  # skip files that were excluded with "!"
-  [ -z "${PRESENT[${KEY}]+x}" ] && continue
-
-  TYPE="${KEY%%|*}"
-  REL="${KEY#*|}"
-
-  if [ "${TYPE}" = "home" ]; then
-    SRC="${HOME}/${REL}"
-    DEST="${CACHE_DIR}/buildcache/${HOME_FOLDER_REPLACEMENT}/${REL}"
-  else
-    SRC="${BUILD_DIR}/${REL}"
-    DEST="${CACHE_DIR}/buildcache/${REL}"
+  if ${NEGATE}; then
+    # Exclusions support globbing. They only affect entries that were added by
+    # lines above, because those are the only files copied into the cache so
+    # far at this point.
+    for MATCH in ${CACHE_BASE}/${SUB}; do
+      REL="${MATCH#"${CACHE_BASE}"/}"
+      echo -n "${REL}" | indent
+      rm -rf "${MATCH}"
+      echo " ✗ - excluded"
+    done
+    continue
   fi
 
-  echo -n "${REL}" | indent
+  # Additive entry: a literal file or folder path, copied as a whole.
+  SRC="${BASE}/${SUB}"
+  DEST="${CACHE_BASE}/${SUB}"
+
+  echo -n "${SUB}" | indent
 
   # skip non-existing files
   if ! [ -e "${SRC}" ]; then
@@ -136,4 +100,4 @@ for KEY in "${ORDER[@]}"; do
   cp -r "${SRC}" "${DEST}"
 
   echo " ✓"
-done
+done < "${BUILD_DIR}/.buildcache"
