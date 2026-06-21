@@ -28,6 +28,13 @@ HOME_FOLDER_REPLACEMENT="__CACHE_HOME__"
 echo "=====> Caching files for future builds"
 
 
+# Start from a clean cache each build. Without this, files that are no longer
+# matched by .buildcache (because they were removed from the source or from the
+# .buildcache file) would linger in the cache forever, making it grow without
+# bound across builds.
+rm -rf "${CACHE_DIR}/buildcache"
+
+
 while IFS= read -r LINE || [ -n "${LINE}" ]; do
   # normalize line endings and surrounding whitespace
   LINE="${LINE%$'\r'}"

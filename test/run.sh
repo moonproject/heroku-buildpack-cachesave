@@ -133,6 +133,33 @@ assert_not_cached "${CACHE2C}" "code/server/node_modules/dep.js"
 assert_cached     "${CACHE2C}" "code/client/node_modules/client.js"
 
 # ---------------------------------------------------------------------------
+# Case 2d: stale files are removed when re-running with a smaller cache set
+#
+# A previous build that cached extra files must not leave them behind on the
+# next build, otherwise the cache (and slug) grows without bound.
+# ---------------------------------------------------------------------------
+run_case "stale files removed on subsequent builds"
+CACHE2D="${CACHE}/c2d"
+mkdir -p "${CACHE2D}"
+
+# First build caches two folders
+cat > "${BUILD}/.buildcache" <<'EOF'
+code/server/node_modules
+code/client/node_modules
+EOF
+"${COMPILE}" "${BUILD}" "${CACHE2D}" > /dev/null
+assert_cached "${CACHE2D}" "code/server/node_modules/dep.js"
+assert_cached "${CACHE2D}" "code/client/node_modules/client.js"
+
+# Second build only caches one folder; the other must be cleaned out
+cat > "${BUILD}/.buildcache" <<'EOF'
+code/client/node_modules
+EOF
+"${COMPILE}" "${BUILD}" "${CACHE2D}" > /dev/null
+assert_not_cached "${CACHE2D}" "code/server/node_modules/dep.js"
+assert_cached     "${CACHE2D}" "code/client/node_modules/client.js"
+
+# ---------------------------------------------------------------------------
 # Case 3: tilde (home) paths still work
 # ---------------------------------------------------------------------------
 run_case "tilde home paths"
