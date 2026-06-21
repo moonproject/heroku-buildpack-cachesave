@@ -11,38 +11,181 @@ indent() {
 BUILD_DIR=$1
 CACHE_DIR=$2
 HOME_FOLDER_REPLACEMENT="__CACHE_HOME__"
+MANIFEST_FILE="${BUILD_DIR}/.buildcache"
 
 
 echo "=====> Caching files for future builds"
 
-for FILENAME in $(cat ${BUILD_DIR}/.buildcache | sed '/^$/d'); do
-  echo -n "${FILENAME}" | indent
+if ! [ -f "${MANIFEST_FILE}" ]; then
+  echo "       .buildcache not found, skipping"
+  exit 0
+fi
 
-  if [[ ${FILENAME} = \~/* ]]; then
-    WITHOUT_TILDE=$(echo ${FILENAME} | sed 's/~\///')
-    SRC=~/${WITHOUT_TILDE}
-    DEST=${CACHE_DIR}/buildcache/${HOME_FOLDER_REPLACEMENT}/${WITHOUT_TILDE}
-  else
-    SRC=${BUILD_DIR}/${FILENAME}
-    DEST=${CACHE_DIR}/buildcache/${FILENAME}
+TMP_INCLUDE=$(mktemp)
+TMP_EXCLUDE=$(mktemp)
+TMP_SELECTED=$(mktemp)
+TMP_ALL=$(mktemp)
+TMP_UNIQ=$(mktemp)
+
+cleanup() {
+  rm -f "${TMP_INCLUDE}" "${TMP_EXCLUDE}" "${TMP_SELECTED}" "${TMP_ALL}" "${TMP_UNIQ}"
+}
+trap cleanup EXIT
+
+# Build an include/exclude list from .buildcache.
+# Supports gitignore-like lines:
+# - direct files / folders
+# - glob patterns
+# - negation with !
+while IFS= read -r RAW_LINE || [ -n "${RAW_LINE}" ]; do
+  # trim leading and trailing whitespace
+  LINE=$(echo "${RAW_LINE}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+  # skip empty lines and comments
+  if [ -z "${LINE}" ] || [[ "${LINE}" == \#* ]]; then
+    continue
   fi
 
+  TARGET_FILE="${TMP_INCLUDE}"
+  PATTERN="${LINE}"
+
+  if [[ "${PATTERN}" == !* ]]; then
+    TARGET_FILE="${TMP_EXCLUDE}"
+    PATTERN="${PATTERN#!}"
+  fi
+
+  # ignore invalid naked negation
+  if [ -z "${PATTERN}" ]; then
+    continue
+  fi
+
+  echo "${PATTERN}" >> "${TARGET_FILE}"
+done < "${MANIFEST_FILE}"
+
+# Return all files/directories that match PATTERN.
+# Pattern behavior:
+# - ~/<path> targets HOME
+# - trailing / means directory and all of its contents
+# - globs are supported via compgen
+# - non-glob direct path is matched exactly when it exists
+collect_matches() {
+  local PATTERN="$1"
+  local BASE
+  local REL
+  local SEARCH_PATTERN
+
+  if [[ "${PATTERN}" == \~/* ]]; then
+    BASE="${HOME}"
+    REL="${PATTERN#~/}"
+    SEARCH_PATTERN="${BASE}/${REL}"
+  else
+    BASE="${BUILD_DIR}"
+    REL="${PATTERN}"
+    SEARCH_PATTERN="${BASE}/${REL}"
+  fi
+
+  # Directory rule (trailing /) caches directory recursively
+  if [[ "${REL}" == */ ]]; then
+    local DIR_SEARCH="${SEARCH_PATTERN%/}"
+    local DIR_REL="${REL%/}"
+
+    if [ -d "${DIR_SEARCH}" ]; then
+      if [[ "${PATTERN}" == \~/* ]]; then
+        echo "__HOME__/${DIR_REL}"
+      else
+        echo "${DIR_REL}"
+      fi
+    fi
+
+    return
+  fi
+
+  # Glob rule
+  if [[ "${REL}" == *"*"* || "${REL}" == *"?"* || "${REL}" == *"["* ]]; then
+    local MATCH
+    while IFS= read -r MATCH; do
+      if [ -n "${MATCH}" ] && [ -e "${MATCH}" ]; then
+        if [[ "${PATTERN}" == \~/* ]]; then
+          echo "__HOME__/${MATCH#${BASE}/}"
+        else
+          echo "${MATCH#${BASE}/}"
+        fi
+      fi
+    done < <(compgen -G "${SEARCH_PATTERN}" || true)
+
+    return
+  fi
+
+  # Direct path rule
+  if [ -e "${SEARCH_PATTERN}" ]; then
+    if [[ "${PATTERN}" == \~/* ]]; then
+      echo "__HOME__/${REL}"
+    else
+      echo "${REL}"
+    fi
+  fi
+}
+
+# Build include candidate set
+while IFS= read -r PATTERN || [ -n "${PATTERN}" ]; do
+  [ -z "${PATTERN}" ] && continue
+  collect_matches "${PATTERN}" >> "${TMP_ALL}"
+done < "${TMP_INCLUDE}"
+
+# De-duplicate includes preserving deterministic order
+awk '!seen[$0]++' "${TMP_ALL}" > "${TMP_UNIQ}"
+mv "${TMP_UNIQ}" "${TMP_SELECTED}"
+
+# Apply excludes (remove anything that matches an exclude pattern)
+while IFS= read -r PATTERN || [ -n "${PATTERN}" ]; do
+  [ -z "${PATTERN}" ] && continue
+
+  > "${TMP_ALL}"
+  collect_matches "!${PATTERN#\!}" | sed 's/^__HOME__/__HOME__/' > "${TMP_ALL}"
+
+  if [ -s "${TMP_ALL}" ]; then
+    grep -F -x -v -f "${TMP_ALL}" "${TMP_SELECTED}" > "${TMP_UNIQ}" || true
+    mv "${TMP_UNIQ}" "${TMP_SELECTED}"
+  fi
+done < "${TMP_EXCLUDE}"
+
+if ! [ -s "${TMP_SELECTED}" ]; then
+  echo "       no matching cache entries"
+  exit 0
+fi
+
+while IFS= read -r ENTRY || [ -n "${ENTRY}" ]; do
+  [ -z "${ENTRY}" ] && continue
+
+  if [[ "${ENTRY}" == __HOME__/* ]]; then
+    WITHOUT_HOME_PREFIX="${ENTRY#__HOME__/}"
+    DISPLAY="~/${WITHOUT_HOME_PREFIX}"
+    SRC="${HOME}/${WITHOUT_HOME_PREFIX}"
+    DEST="${CACHE_DIR}/buildcache/${HOME_FOLDER_REPLACEMENT}/${WITHOUT_HOME_PREFIX}"
+  else
+    DISPLAY="${ENTRY}"
+    SRC="${BUILD_DIR}/${ENTRY}"
+    DEST="${CACHE_DIR}/buildcache/${ENTRY}"
+  fi
+
+  echo -n "${DISPLAY}" | indent
+
   # skip non-existing files
-  if ! [ -e ${SRC} ]; then
+  if ! [ -e "${SRC}" ]; then
     echo " ✗ - not found"
     continue
   fi
 
   # create parent directory structure
-  mkdir -p $(dirname ${DEST})
+  mkdir -p "$(dirname "${DEST}")"
 
   # delete old files
-  if [ -e ${DEST} ]; then
-    rm -r ${DEST}
+  if [ -e "${DEST}" ]; then
+    rm -r "${DEST}"
   fi
 
   # copy files to cache
-  cp -r ${SRC} ${DEST}
+  cp -r "${SRC}" "${DEST}"
 
   echo " ✓"
-done
+done < "${TMP_SELECTED}"
