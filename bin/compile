@@ -2,6 +2,14 @@
 
 set -e # fail fast
 
+# Allow advanced globbing so that patterns in .buildcache behave like .gitignore:
+#   *      - matches anything except a slash
+#   **     - matches across directory boundaries (recursive)
+#   ?, []  - standard shell globbing
+# nullglob: patterns that match nothing expand to nothing (instead of the literal pattern)
+# dotglob: globs also match dot files (like .gitignore does)
+shopt -s nullglob dotglob globstar
+
 
 indent() {
   sed -u 's/^/       /'
@@ -15,34 +23,117 @@ HOME_FOLDER_REPLACEMENT="__CACHE_HOME__"
 
 echo "=====> Caching files for future builds"
 
-for FILENAME in $(cat ${BUILD_DIR}/.buildcache | sed '/^$/d'); do
-  echo -n "${FILENAME}" | indent
 
-  if [[ ${FILENAME} = \~/* ]]; then
-    WITHOUT_TILDE=$(echo ${FILENAME} | sed 's/~\///')
-    SRC=~/${WITHOUT_TILDE}
-    DEST=${CACHE_DIR}/buildcache/${HOME_FOLDER_REPLACEMENT}/${WITHOUT_TILDE}
+# Expand a glob into the concrete list of files it covers.
+# Directories are expanded recursively to every file they contain, so that an
+# entry/exclusion can target a folder as a whole.
+# Argument: a (possibly globbed) absolute path prefix.
+# Output: one absolute file path per line.
+expand_files() {
+  local match
+  for match in $1; do
+    if [ -d "${match}" ]; then
+      find "${match}" -type f 2>/dev/null
+    elif [ -e "${match}" ]; then
+      echo "${match}"
+    fi
+  done
+}
+
+
+# Insertion-ordered set of selected files.
+# PRESENT maps a "type|relative-path" key to 1 while the file is selected.
+# ORDER keeps the first-seen order so output is stable and predictable.
+declare -A PRESENT
+declare -A SEEN
+ORDER=()
+
+
+while IFS= read -r LINE || [ -n "${LINE}" ]; do
+  # normalize line endings and surrounding whitespace
+  LINE="${LINE%$'\r'}"
+  LINE="$(echo "${LINE}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+  # skip blank lines and comments
+  [ -z "${LINE}" ] && continue
+  case "${LINE}" in
+    \#*) continue ;;
+  esac
+
+  # a leading "!" negates the pattern, removing matches from the cache set
+  NEGATE=false
+  case "${LINE}" in
+    !*)
+      NEGATE=true
+      LINE="${LINE#!}"
+      ;;
+    \\!* | \\#*)
+      # allow escaping a literal leading "!" or "#"
+      LINE="${LINE#\\}"
+      ;;
+  esac
+
+  # determine the base directory the pattern is resolved against
+  if [[ ${LINE} = \~/* ]]; then
+    TYPE="home"
+    BASE="${HOME}"
+    SUB="${LINE#\~/}"
   else
-    SRC=${BUILD_DIR}/${FILENAME}
-    DEST=${CACHE_DIR}/buildcache/${FILENAME}
+    TYPE="build"
+    BASE="${BUILD_DIR}"
+    SUB="${LINE}"
   fi
 
+  while IFS= read -r ABS; do
+    [ -z "${ABS}" ] && continue
+    REL="${ABS#"${BASE}"/}"
+    KEY="${TYPE}|${REL}"
+    if ${NEGATE}; then
+      unset 'PRESENT[${KEY}]'
+    else
+      PRESENT[${KEY}]=1
+      if [ -z "${SEEN[${KEY}]+x}" ]; then
+        SEEN[${KEY}]=1
+        ORDER+=("${KEY}")
+      fi
+    fi
+  done < <(expand_files "${BASE}/${SUB}")
+done < "${BUILD_DIR}/.buildcache"
+
+
+for KEY in "${ORDER[@]}"; do
+  # skip files that were excluded with "!"
+  [ -z "${PRESENT[${KEY}]+x}" ] && continue
+
+  TYPE="${KEY%%|*}"
+  REL="${KEY#*|}"
+
+  if [ "${TYPE}" = "home" ]; then
+    SRC="${HOME}/${REL}"
+    DEST="${CACHE_DIR}/buildcache/${HOME_FOLDER_REPLACEMENT}/${REL}"
+  else
+    SRC="${BUILD_DIR}/${REL}"
+    DEST="${CACHE_DIR}/buildcache/${REL}"
+  fi
+
+  echo -n "${REL}" | indent
+
   # skip non-existing files
-  if ! [ -e ${SRC} ]; then
+  if ! [ -e "${SRC}" ]; then
     echo " ✗ - not found"
     continue
   fi
 
   # create parent directory structure
-  mkdir -p $(dirname ${DEST})
+  mkdir -p "$(dirname "${DEST}")"
 
   # delete old files
-  if [ -e ${DEST} ]; then
-    rm -r ${DEST}
+  if [ -e "${DEST}" ]; then
+    rm -r "${DEST}"
   fi
 
   # copy files to cache
-  cp -r ${SRC} ${DEST}
+  cp -r "${SRC}" "${DEST}"
 
   echo " ✓"
 done
